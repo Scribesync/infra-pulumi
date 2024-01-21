@@ -1,66 +1,62 @@
 const pulumi = require("@pulumi/pulumi");
 const aws = require("@pulumi/aws");
-const AWS = require('aws-sdk');
 
-
-// AWS Configurations
+// AWS Provider configuration
 const awsProfile = new pulumi.Config("aws").require("profile");
 const awsRegion = new pulumi.Config("aws").require("region");
-const email = new pulumi.Config("aws").require("email")
+const notionApiKey = new pulumi.Config().require("notionApiKey");
 
-
-// Using AWS Profile
-const awsProvider = new aws.Provider("awsacc", {
+const awsProvider = new aws.Provider("awsProvider", {
     profile: awsProfile,
     region: awsRegion,
-  });
-
-// Create an AWS resource (S3 Bucket)
-const bucket = new aws.s3.Bucket("my-bucket", {
-    provider: awsProvider,
 });
 
-// Create an SNS topic
-const mySnsTopic = new aws.sns.Topic("mySnsTopic");
+// S3 Bucket for storing PDFs
+const pdfBucket = new aws.s3.Bucket("pdfBucket", {}, { provider: awsProvider });
 
-// Subscribe an email to the SNS topic
-const snsSubscription = new aws.sns.TopicSubscription("snsSubscription", {
-    topic: mySnsTopic,
-    protocol: "email",
-    endpoint: email,
-});
+// Lambda Role with S3 access
+const lambdaRole = new aws.iam.Role("lambdaRole", {
+    assumeRolePolicy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+            Action: "sts:AssumeRole",
+            Effect: "Allow",
+            Principal: {
+                Service: "lambda.amazonaws.com",
+            },
+        }],
+    }),
+}, { provider: awsProvider });
 
-// Read in the Lambda zip file
-const lambdaZipPath = '/Users/ankithreddy/Desktop/cloud/Nov22/lambda.zip';
-const lambdaZip = new pulumi.asset.FileArchive(lambdaZipPath);
+// Attach S3 access policy to Lambda Role
+const lambdaS3Policy = new aws.iam.RolePolicy("lambdaS3Policy", {
+    role: lambdaRole.id,
+    policy: JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{
+            Action: ["s3:PutObject", "s3:GetObject"],
+            Effect: "Allow",
+            Resource: [pulumi.interpolate`${pdfBucket.arn}/*`],
+        }],
+    }),
+}, { provider: awsProvider });
 
-const lambda = new aws.lambda.Function("myLambdaFunction",{
-    runtime: aws.lambda.Runtime.NodeJS14dX,
-    code: lambdaZip,
+// Lambda Function 
+const myLambdaFunction = new aws.lambda.Function("myLambdaFunction", {
+    runtime: "nodejs14.x",
+    role: lambdaRole.arn,
     handler: "index.handler",
+    //change the path to zipped lambda code here remember to zip the contents of whole lambdcode as well
+    code: new pulumi.asset.FileArchive("/path/to/your/lambda/zip"),
     environment: {
         variables: {
-            SNS_TOPIC_ARN: mySnsTopic.arn,
-        }
-    }
-},{provider: awsProvider});
+            NOTION_API_KEY: notionApiKey,
+            S3_BUCKET_NAME: pdfBucket.bucket,
+        },
+    },
+}, { provider: awsProvider });
 
 
-// Create an SNS subscription for the Lambda function
-const snsLambdaSubscription = new aws.sns.TopicSubscription("snsLambdaSubscription", {
-    topic: mySnsTopic,
-    protocol: "lambda",
-    endpoint: myLambdaFunction.arn,
-});
-
-
-
-
-// Export the Lambda function ARN
+// Outputs
+exports.bucketName = pdfBucket.bucket;
 exports.lambdaFunctionArn = myLambdaFunction.arn;
-
-// Export the SNS topic ARN
-exports.snsTopicArn = mySnsTopic.arn;
-
-// Export the name of the bucket
-exports.bucketName = bucket.id;
